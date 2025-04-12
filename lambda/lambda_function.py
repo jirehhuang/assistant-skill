@@ -6,15 +6,18 @@ from ask_sdk_model import Response
 import ask_sdk_core.utils as ask_utils
 import requests
 import logging
-import json
+import os
 import re
+import json
 import openai
+from dotenv import load_dotenv
 
-## Secrets
-openai.api_key = ""
-MEALIE_API_KEY = ""
-MEALIE_URL = ""
-MEALIE_LIST_ID = ""
+## Retrieve environment variables
+load_dotenv()
+openai.api_key = OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+MEALIE_API_KEY = os.getenv("MEALIE_API_KEY")
+MEALIE_URL = os.getenv("MEALIE_URL")
+MEALIE_LIST_ID = os.getenv("MEALIE_LIST_ID")
 
 ## Headers for authentication
 MEALIE_HEADERS = {
@@ -58,9 +61,7 @@ class GeneralIntentHandler(AbstractRequestHandler):
         
         ## Switch statement to handle different queries
         if query.startswith("add"):
-            speak_output = add_to_shopping_list(query)
-        elif query.startswith("help"):
-            speak_output = "Try: add item,"
+            speak_output = add_to_mealie_list(query)
         else:
             # speak_output = "Please try again."
             session_attr = handler_input.attributes_manager.session_attributes
@@ -112,10 +113,11 @@ class CancelOrStopIntentHandler(AbstractRequestHandler):
                 .response
         )
 
+## https://github.com/k4l1sh/alexa-gpt
 def generate_gpt_response(chat_history, new_question):
     """Generates a GPT response to a new question"""
     headers = {
-        "Authorization": f"Bearer {api_key}",
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json"
     }
     url = "https://api.openai.com/v1/chat/completions"
@@ -129,7 +131,7 @@ def generate_gpt_response(chat_history, new_question):
         "model": "gpt-4o-mini",
         "messages": messages,
         "max_tokens": 300,
-        "temperature": 0.5
+        "temperature": 0
     }
     try:
         response = requests.post(url, headers=headers, data=json.dumps(data))
@@ -141,7 +143,7 @@ def generate_gpt_response(chat_history, new_question):
     except Exception as e:
         return f"Error generating response: {str(e)}"
 
-def add_to_shopping_list(query):
+def add_to_mealie_list(query):
     try:
         ## Extract the item from the query
         item = re.sub(r"add\s+", "", query, flags=re.I).strip()
