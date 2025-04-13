@@ -61,7 +61,7 @@ else:
     MODEL_HEADERS = OPENROUTER_HEADERS
 
 ## Parameters
-MAX_INPUT_TOKENS = 3000
+MAX_INPUT_CHARS = 10000
 MAX_OUTPUT_TOKENS = 300
 
 logger = logging.getLogger(__name__)
@@ -110,8 +110,7 @@ class GeneralIntentHandler(AbstractRequestHandler):
             ## Switch statement to handle different queries
             if query in ["wait", "hold on", "pause", "hang on", "just a moment", "let me think", "give me a second"]:
                 ## TODO: Not working
-                # speak_output = "<speak>Sure, I'll give you a minute. <audio src='https://github.com/anars/blank-audio/raw/refs/heads/master/10-seconds-of-silence.mp3'/></speak>"
-                speak_output = "Sure thing."
+                speak_output = "<speak>Sure, I'll give you a minute. <audio src='https://github.com/anars/blank-audio/raw/refs/heads/master/10-seconds-of-silence.mp3'/></speak>"
             elif query.startswith("add"):
                 item = re.sub(r"^add\s+", "", query, flags=re.I).strip()
                 speak_output = smart_add_item(item)
@@ -176,12 +175,20 @@ class CancelOrStopIntentHandler(AbstractRequestHandler):
 def general_response(chat_history, new_question):
     """Generates a general response to a new question."""
     messages = [{"role": "system", "content": 
-                 "You are a helpful assistant. "
+                 "You are a helpful assistant named Jarvis. "
                  "Answer as succinctly as possible while maintaining clarity and completeness. "
-                 "If you’re having trouble simplifying your response, provide a brief summary and prompt the user to determine what details are desired."}]
-    for timestamp, question, answer in chat_history[-10:]:
-        messages.append({"role": "user", "content": f"[{timestamp}]: {question}"})
-        messages.append({"role": "assistant", "content": answer})
+                 "If you’re having trouble simplifying your response, provide a brief summary and prompt the user for desired details."}]
+    
+    total_chars = 0
+    for timestamp, question, answer in reversed(chat_history):
+        user_message = f"[{timestamp}]: {question}"
+        assistant_message = answer
+        if (total_chars + len(user_message) + len(assistant_message)) > MAX_INPUT_CHARS:
+            break
+        messages.append({"role": "user", "content": user_message})
+        messages.append({"role": "assistant", "content": assistant_message})
+        total_chars += len(user_message) + len(assistant_message)
+    
     messages.append({"role": "user", "content": new_question})
     
     data = {
