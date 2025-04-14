@@ -16,6 +16,7 @@ import re
 import json
 import openai
 from dotenv import load_dotenv
+from collections import defaultdict
 
 
 ## Retrieve environment variables
@@ -124,6 +125,9 @@ class GeneralIntentHandler(AbstractRequestHandler):
                     session_attr["session_page_id"] = session_page_id
                 else:
                     speak_output = session_page_id  # Error message
+            elif any(keyword in query.lower() for keyword in ["get", "load", "retrieve"]) and any(phrase in query.lower() for phrase in ["shopping list", "mealie list"]):
+                ## Get Mealie shopping list
+                speak_output = get_shopping_list()
             elif query in ["session", "session attributes"]:
                 ## TODO: Return session attributes (temporary, for debugging)
                 speak_output = str(session_attr)
@@ -495,6 +499,27 @@ def save_chat_history_to_notion(page_id=None, chat_history=[]):
     
     except Exception as e:
         return f"Error occurred: {str(e)}"
+
+def get_shopping_list():
+    ## Retrieve items in shopping list
+    response = requests.get(f"{MEALIE_URL}/households/shopping/items?orderBy=checked&orderDirection=asc&page=1&perPage=100&checked=false", 
+                        headers=MEALIE_HEADERS)
+
+    items = [{"item": item["display"], "label": item["label"]["name"] if "label" in item and item["label"] else "No Label"} 
+            for item in response.json()["items"] if item["checked"] == False]
+
+    ## Group items by their labels
+    grouped_items = defaultdict(list)
+    for entry in items:
+        grouped_items[entry['label']].append(entry['item'])
+
+    ## Format the string
+    total_items = sum(len(items) for items in grouped_items.values())
+    items_string = f"{total_items} items. " + ". ".join(
+        f"{len(items)} {label}: {', '.join(items)}" for label, items in grouped_items.items()
+    )
+    return items_string
+
 
 sb = SkillBuilder()
 
