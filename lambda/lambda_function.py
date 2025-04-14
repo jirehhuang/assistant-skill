@@ -4,9 +4,11 @@ from ask_sdk_core.skill_builder import SkillBuilder
 from ask_sdk_core.handler_input import HandlerInput
 from ask_sdk_model import Response
 import ask_sdk_core.utils as ask_utils
-import logging
 import pytz
+import logging
 from datetime import datetime
+
+##====================================================================================================##
 
 import requests
 import os
@@ -51,20 +53,17 @@ NOTION_HEADERS = {
 }
 
 ## API settings for selected model
-# MODEL = "gpt-4o-mini"
-# MODEL = "nvidia/llama-3.1-nemotron-ultra-253b-v1:free"
-MODEL = "google/gemini-2.0-flash-thinking-exp:free"
-
-if MODEL == "gpt-4o-mini":
-    MODEL_API_URL = "https://api.openrouter.ai/v1/generate"
-    MODEL_HEADERS = OPENAI_HEADERS
-else:
-    MODEL_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-    MODEL_HEADERS = OPENROUTER_HEADERS
+# MODEL_MAIN = "gpt-4o-mini"
+MODEL_MAIN = "google/gemini-2.0-flash-thinking-exp:free"
+MODEL_FREE = "google/gemini-2.0-flash-thinking-exp:free"
+MODEL_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+MODEL_HEADERS = OPENROUTER_HEADERS
 
 ## Parameters
 MAX_INPUT_CHARS = 10000
 MAX_OUTPUT_TOKENS = 300
+
+##====================================================================================================##
 
 TZ = pytz.timezone('America/Los_Angeles')
 
@@ -81,9 +80,8 @@ class LaunchRequestHandler(AbstractRequestHandler):
     def handle(self, handler_input):
         # type: (HandlerInput) -> Response
         speak_output = "How can I help?"
-
-        session_attr = handler_input.attributes_manager.session_attributes
-        session_attr["chat_history"] = []
+        
+        session_attr = initialize_session_attr(handler_input.attributes_manager.session_attributes)
 
         return (
             handler_input.response_builder
@@ -104,37 +102,34 @@ class GeneralIntentHandler(AbstractRequestHandler):
             query = handler_input.request_envelope.request.intent.slots["query"].value
 
             ## Exit skill
-            if query in ["no", "stop", "exit", "quit", "cancel", "close", "nevermind", "no thank you"]:
+            if query in ["no", "stop", "exit", "quit", "cancel", "close", "nevermind", "no thank you", "save and exit"]:
                 return CancelOrStopIntentHandler().handle(handler_input)
             
-            session_attr = handler_input.attributes_manager.session_attributes
-            if "chat_history" not in session_attr:
-                session_attr["chat_history"] = []
+            session_attr = initialize_session_attr(handler_input.attributes_manager.session_attributes)
 
             ## Switch statement to handle different queries
             if query in ["wait", "hold on", "pause", "hang on", "just a moment", "let me think", "give me a second"]:
                 ## Wait for x seconds
                 ## TODO: Not working
-                speak_output = "<speak>Sure, I'll give you a minute. <audio src='https://github.com/anars/blank-audio/raw/refs/heads/master/10-seconds-of-silence.mp3'/></speak>"
+                speak_output = "<speak>Sure thing. <audio src='https://github.com/anars/blank-audio/raw/refs/heads/master/10-seconds-of-silence.mp3'/></speak>"
             elif query.startswith("add"):
                 ## Add to list
                 item = re.sub(r"^add\s+", "", query, flags=re.I).strip()
-                speak_output = smart_add_item(item)
+                speak_output = smart_add_item(item, session_attr)
             elif query.startswith("save"):
                 ## Attempt to save output
                 speak_output = "Saved"
                 session_page_id = save_chat_history_to_notion(page_id = session_attr.get("session_page_id", None), chat_history=session_attr.get("chat_history", []))
-                if "Error" not in session_page_id:
+                if " " not in session_page_id:
                     session_attr["session_page_id"] = session_page_id
                 else:
                     speak_output = session_page_id  # Error message
-            elif query in ["chat history"]:
-                ## Return chat history
-                ## TODO: Temporary
-                speak_output = str(session_attr["chat_history"])
+            elif query in ["session", "session attributes"]:
+                ## TODO: Return session attributes (temporary, for debugging)
+                speak_output = str(session_attr)
             else:
                 ## General LLM response
-                speak_output = general_response(session_attr["chat_history"], query)
+                speak_output = general_response(query, session_attr)
             
             timestamp = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
             session_attr["chat_history"].append((timestamp, query, speak_output))
@@ -179,7 +174,8 @@ class CancelOrStopIntentHandler(AbstractRequestHandler):
     def can_handle(self, handler_input):
         # type: (HandlerInput) -> bool
         return (ask_utils.is_intent_name("AMAZON.CancelIntent")(handler_input) or
-                ask_utils.is_intent_name("AMAZON.StopIntent")(handler_input))
+                ask_utils.is_intent_name("AMAZON.StopIntent")(handler_input) or
+                ask_utils.is_request_type("SessionEndedRequest")(handler_input))
 
     def handle(self, handler_input):
         # type: (HandlerInput) -> Response
@@ -187,9 +183,9 @@ class CancelOrStopIntentHandler(AbstractRequestHandler):
         session_attr = handler_input.attributes_manager.session_attributes
         
         ## Attempt to save output
-        speak_output = "Saved"
+        speak_output = "OK"
         session_page_id = save_chat_history_to_notion(page_id = session_attr.get("session_page_id", None), chat_history=session_attr.get("chat_history", []))
-        if "Error" not in session_page_id:
+        if " " not in session_page_id:
             session_attr["session_page_id"] = session_page_id
         else:
             speak_output = session_page_id  # Error message
@@ -201,38 +197,60 @@ class CancelOrStopIntentHandler(AbstractRequestHandler):
                 .response
         )
 
-def general_response(chat_history, new_question):
-    """Generates a general response to a new question."""
-    messages = [{"role": "system", "content": 
-                 "You are a helpful assistant. "
-                 "Answer as succinctly as possible while maintaining clarity and completeness. "
-                 "If you’re having trouble simplifying your response, provide a brief summary and prompt the user for desired details."}]
-    
-    total_chars = 0
-    for timestamp, question, answer in reversed(chat_history):
-        user_message = f"[{timestamp}] {question}"
-        assistant_message = answer
-        if (total_chars + len(user_message) + len(assistant_message)) > MAX_INPUT_CHARS:
-            break
-        messages.append({"role": "user", "content": user_message})
-        messages.append({"role": "assistant", "content": assistant_message})
-        total_chars += len(user_message) + len(assistant_message)
-    
-    messages.append({"role": "user", "content": new_question})
-    
-    data = {
-        "model": MODEL,
-        "messages": messages,
-        "max_tokens": MAX_OUTPUT_TOKENS,
-        "temperature": 0
-    }
+def initialize_session_attr(session_attr = {}):
+    if "chat_history" not in session_attr:
+        session_attr["chat_history"] = []
+    if "model_main" not in session_attr:
+        session_attr["model_main"] = MODEL_MAIN
+    if "model_free" not in session_attr:
+        session_attr["model_free"] = MODEL_FREE
+    session_attr["model_api_url"] = MODEL_API_URL
+    session_attr["model_headers"] = MODEL_HEADERS
+    if "max_input_chars" not in session_attr:
+        session_attr["max_input_chars"] = MAX_INPUT_CHARS
+    if "max_output_tokens" not in session_attr:
+        session_attr["max_output_tokens"] = MAX_OUTPUT_TOKENS
+    return session_attr
+
+def general_response(query, session_attr = {}):
+    """Generates a general response to a query."""
     try:
-        response = requests.post(MODEL_API_URL, headers=MODEL_HEADERS, data=json.dumps(data))
+        ## Check session attributes
+        session_attr = initialize_session_attr(session_attr)
+
+        messages = [{"role": "system", "content": 
+                     "You are an AI voice assistant designed to engage in natural, real-time conversations. "
+                     "Assist users by answering questions, providing information, asking clarifying questions, offering suggestions, and acting as a sounding board. "
+                     "Be conversationally concise with your responses. "
+                     "Avoid unnecessary elaboration unless the user requests more details. "
+                     "If you do not know the answer to a question, admit it honestly and suggest alternative ways the user might find the information."}]
+        
+        total_chars = 0
+        for timestamp, question, answer in reversed(session_attr["chat_history"]):
+            user_message = f"[{timestamp}] {question}"
+            assistant_message = answer
+            if (total_chars + len(user_message) + len(assistant_message)) > session_attr["max_input_chars"]:
+                break
+            messages.append({"role": "user", "content": user_message})
+            messages.append({"role": "assistant", "content": assistant_message})
+            total_chars += len(user_message) + len(assistant_message)
+        
+        messages.append({"role": "user", "content": query})
+        
+        data = {
+            "model": session_attr["model_free"],
+            "messages": messages,
+            "max_tokens": session_attr["max_output_tokens"],
+            "temperature": 0
+        }
+        
+        response = requests.post(session_attr["model_api_url"], 
+                                 headers=session_attr["model_headers"], data=json.dumps(data))
         response_data = response.json()
         if response.ok:
             return response_data['choices'][0]['message']['content']
         else:
-            return f"Error {response.status_code}: {response_data['error']['message']}"
+            return f"Error {response.status_code}: {response_data.get('error', {}).get('message', 'Unknown error')}"
     except Exception as e:
         return f"Error generating response: {str(e)}"
 
@@ -343,33 +361,36 @@ def find_or_create_notion_task(title, parent_page_id=NOTION_TASK_ID_GENERAL):
         print(f"Error occurred: {str(e)}")
         return None
 
-def smart_add_item(input_value):
+def smart_add_item(input_value, session_attr = {}):
     try:
+        ## Check session attributes
+        session_attr = initialize_session_attr(session_attr)
+
         ## Define the prompt
         prompt = f"""
-        You are a smart assistant. Analyze the following input and split it into individual items or tasks. 
-        For each item or task, determine if it is a shopping item or a task. 
+        You are a smart assistant. Analyze the following input and split it into individual items. 
+        For each item, determine if it is a shopping item or a task/note. 
         Respond with a JSON array where each element is a dictionary with "function" and "item" attributes.
         The output format should be a raw JSON array without formatting (such as code block) that can be interpretable with json.loads().
-        "function" should be "add_to_mealie_list" for shopping items and "create_notion_task" for tasks.
+        "function" should be "add_to_mealie_list" for shopping items and "create_notion_task" for tasks and notes.
         Input: "{input_value}"
         """
 
         ## Call model to analyze the input
         payload = {
-            "model": MODEL,
+            "model": session_attr["model_main"],
             "messages": [{"role": "user", "content": prompt}]
         }
-        response = requests.post(MODEL_API_URL, 
-                                 headers=MODEL_HEADERS, data=json.dumps(payload))
+        response = requests.post(session_attr["model_api_url"], 
+                                 headers=session_attr["model_headers"], data=json.dumps(payload))
 
         if response.status_code != 200:
             return f"Error calling {payload['model']}: {response.status_code}, {response.text}"
 
         ## Parse the response
-        gpt_response = response.json()
-        gpt_content = gpt_response["choices"][0]["message"]["content"]
-        decisions = json.loads(gpt_content)
+        response_json = response.json()
+        response_json = response_json["choices"][0]["message"]["content"]
+        decisions = json.loads(response_json)
         print(decisions)
 
         mealie_items = []
@@ -381,7 +402,7 @@ def smart_add_item(input_value):
                 add_to_mealie_list(decision["item"])
                 mealie_items.append(decision["item"])
             elif decision["function"] == "create_notion_task":
-                create_notion_task(decision["item"])
+                create_notion_task(decision["item"])  # Create regardless of existing task
                 notion_items.append(decision["item"])
             print(f"Decision: {decision['function']} - {decision['item']}")
 
