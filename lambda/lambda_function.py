@@ -5,6 +5,7 @@ from ask_sdk_core.handler_input import HandlerInput
 from ask_sdk_model import Response
 import ask_sdk_core.utils as ask_utils
 import logging
+import pytz
 from datetime import datetime
 
 import requests
@@ -28,6 +29,7 @@ MEALIE_LIST_ID = os.getenv("MEALIE_LIST_ID")
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 NOTION_DATABASE_ID_TASKS = os.getenv("NOTION_DATABASE_ID_TASKS")
 NOTION_TASK_ID_GENERAL = os.getenv("NOTION_TASK_ID_GENERAL")
+NOTION_TASK_ID_CHATS = os.getenv("NOTION_TASK_ID_CHATS")
 
 ## Headers for authentication
 OPENAI_HEADERS = {
@@ -63,6 +65,8 @@ else:
 ## Parameters
 MAX_INPUT_CHARS = 10000
 MAX_OUTPUT_TOKENS = 300
+
+TZ = pytz.timezone('America/Los_Angeles')
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -109,15 +113,30 @@ class GeneralIntentHandler(AbstractRequestHandler):
 
             ## Switch statement to handle different queries
             if query in ["wait", "hold on", "pause", "hang on", "just a moment", "let me think", "give me a second"]:
+                ## Wait for x seconds
                 ## TODO: Not working
                 speak_output = "<speak>Sure, I'll give you a minute. <audio src='https://github.com/anars/blank-audio/raw/refs/heads/master/10-seconds-of-silence.mp3'/></speak>"
             elif query.startswith("add"):
+                ## Add to list
                 item = re.sub(r"^add\s+", "", query, flags=re.I).strip()
                 speak_output = smart_add_item(item)
+            elif query.startswith("save"):
+                ## Attempt to save output
+                speak_output = "Saved"
+                session_page_id = save_chat_history_to_notion(page_id = session_attr.get("session_page_id", None), chat_history=session_attr.get("chat_history", []))
+                if "Error" not in session_page_id:
+                    session_attr["session_page_id"] = session_page_id
+                else:
+                    speak_output = session_page_id  # Error message
+            elif query in ["chat history"]:
+                ## Return chat history
+                ## TODO: Temporary
+                speak_output = str(session_attr["chat_history"])
             else:
+                ## General LLM response
                 speak_output = general_response(session_attr["chat_history"], query)
             
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
             session_attr["chat_history"].append((timestamp, query, speak_output))
 
             return (
@@ -164,24 +183,34 @@ class CancelOrStopIntentHandler(AbstractRequestHandler):
 
     def handle(self, handler_input):
         # type: (HandlerInput) -> Response
-        speak_output = "Take care"
+        
+        session_attr = handler_input.attributes_manager.session_attributes
+        
+        ## Attempt to save output
+        speak_output = "Saved"
+        session_page_id = save_chat_history_to_notion(page_id = session_attr.get("session_page_id", None), chat_history=session_attr.get("chat_history", []))
+        if "Error" not in session_page_id:
+            session_attr["session_page_id"] = session_page_id
+        else:
+            speak_output = session_page_id  # Error message
 
         return (
             handler_input.response_builder
                 .speak(speak_output)
+                .set_should_end_session(True)
                 .response
         )
 
 def general_response(chat_history, new_question):
     """Generates a general response to a new question."""
     messages = [{"role": "system", "content": 
-                 "You are a helpful assistant named Jarvis. "
+                 "You are a helpful assistant. "
                  "Answer as succinctly as possible while maintaining clarity and completeness. "
                  "If you’re having trouble simplifying your response, provide a brief summary and prompt the user for desired details."}]
     
     total_chars = 0
     for timestamp, question, answer in reversed(chat_history):
-        user_message = f"[{timestamp}]: {question}"
+        user_message = f"[{timestamp}] {question}"
         assistant_message = answer
         if (total_chars + len(user_message) + len(assistant_message)) > MAX_INPUT_CHARS:
             break
@@ -227,7 +256,7 @@ def add_to_mealie_list(item):
     except Exception as e:
         return f"Error occurred: {str(e)}"
 
-def create_notion_task(title, parent_task_id=NOTION_TASK_ID_GENERAL):
+def create_notion_task(title, parent_page_id=NOTION_TASK_ID_GENERAL):
     try:
         # Create the payload for the API request
         payload = {
@@ -245,7 +274,7 @@ def create_notion_task(title, parent_task_id=NOTION_TASK_ID_GENERAL):
                 "Parent task": {
                     "relation": [
                         {
-                            "id": parent_task_id
+                            "id": parent_page_id
                         }
                     ]
                 }
@@ -258,11 +287,61 @@ def create_notion_task(title, parent_task_id=NOTION_TASK_ID_GENERAL):
                                  data=json.dumps(payload))
 
         if response.status_code == 200:
-            print(f"Page '{title}' created successfully.")
+            page_id = response.json().get("id")
+            print(f"Page '{title}' created successfully with ID: {page_id}.")
+            return page_id
         else:
             print(f"Failed to create page '{title}': {response.status_code}, {response.text}")
+            return None
     except Exception as e:
         print(f"Error occurred: {str(e)}")
+        return None
+
+def find_or_create_notion_task(title, parent_page_id=NOTION_TASK_ID_GENERAL):
+    try:
+        # Search for a page with the same title and parent task
+        query_payload = {
+            "filter": {
+                "and": [
+                    {
+                        "property": "Name",
+                        "title": {
+                            "equals": title
+                        }
+                    },
+                    {
+                        "property": "Parent task",
+                        "relation": {
+                            "contains": parent_page_id
+                        }
+                    }
+                ]
+            }
+        }
+
+        # Send the request to search for the page
+        search_response = requests.post(f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID_TASKS}/query",
+                                        headers=NOTION_HEADERS,
+                                        data=json.dumps(query_payload))
+
+        if search_response.status_code == 200:
+            results = search_response.json().get("results", [])
+            if results:
+                page_id = results[0]["id"]
+                print(f"Page '{title}' already exists with ID: {page_id}.")
+                return page_id
+            else:
+                print(f"No existing page found for title '{title}'. Creating a new one.")
+        else:
+            print(f"Failed to search for page '{title}': {search_response.status_code}, {search_response.text}")
+            return None
+
+        # Create the page if it doesn't exist
+        return create_notion_task(title, parent_page_id)
+
+    except Exception as e:
+        print(f"Error occurred: {str(e)}")
+        return None
 
 def smart_add_item(input_value):
     try:
@@ -313,6 +392,86 @@ def smart_add_item(input_value):
 
         return result_str
 
+    except Exception as e:
+        return f"Error occurred: {str(e)}"
+
+def save_chat_history_to_notion(page_id=None, chat_history=[]):
+    """
+    Save chat history to a Notion page.
+    """
+    try:
+        if not chat_history:
+            return "No chat history provided to save."
+        if page_id is None:
+            page_id = find_or_create_notion_task(f"Session {chat_history[0][0]}", parent_page_id=NOTION_TASK_ID_CHATS)
+
+        ## Fetch existing content from the Notion page
+        response = requests.get(f"https://api.notion.com/v1/blocks/{page_id}/children", headers=NOTION_HEADERS)
+        if response.status_code != 200:
+            return f"Failed to fetch page content: {response.status_code}, {response.text}"
+        
+        existing_content = response.json()
+        existing_texts = set()
+        for block in existing_content.get("results", []):
+            if block["type"] == "paragraph" and block["paragraph"]["rich_text"]:
+                existing_texts.add(block["paragraph"]["rich_text"][0]["text"]["content"])
+        
+        ## Prepare new chat history to add
+        new_blocks = []
+        for timestamp, query, speak_output in chat_history:
+            try:
+                # Create main block for the timestamp
+                if timestamp not in existing_texts:  # Avoid duplicates
+                    new_blocks.append({
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {
+                            "rich_text": [{"type": "text", "text": {"content": timestamp}}],
+                            "children": [
+                                {
+                                    "object": "block",
+                                    "type": "paragraph",
+                                    "paragraph": {
+                                        "rich_text": [
+                                            {
+                                                "type": "text",
+                                                "text": {
+                                                "content": query
+                                                },
+                                                "annotations": {
+                                                "bold": True,
+                                                "italic": True
+                                                }
+                                            }
+                                        ]
+                                    }
+                                },
+                                {
+                                    "object": "block",
+                                    "type": "paragraph",
+                                    "paragraph": {
+                                        "rich_text": [{"type": "text", "text": {"content": f"{speak_output}"}}]
+                                    }
+                                }
+                            ]
+                        }
+                    })
+            except Exception as e:
+                return f"Error processing chat history entry: {str(e)}"
+        
+        if not new_blocks:
+            return f"{page_id}"
+        
+        ## Add new chat history to the Notion page
+        payload = {"children": new_blocks}
+        response = requests.patch(f"https://api.notion.com/v1/blocks/{page_id}/children", 
+                                  headers=NOTION_HEADERS, data=json.dumps(payload))
+        
+        if response.status_code == 200:
+            return f"{page_id}"
+        else:
+            return f"Error updating page: {response.status_code}, {response.text}"
+    
     except Exception as e:
         return f"Error occurred: {str(e)}"
 

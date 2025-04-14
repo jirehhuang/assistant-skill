@@ -3,3 +3,4 @@ boto3==1.9.216
 requests>=2.20.0
 openai>=1.70.0
 python-dotenv==1.0.0
+pytz>=2020.1
