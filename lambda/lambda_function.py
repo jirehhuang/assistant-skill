@@ -122,32 +122,41 @@ class GeneralIntentHandler(AbstractRequestHandler):
             session_attr = check_session_attr(session_attr = handler_input.attributes_manager.session_attributes, persistent_attr = handler_input.attributes_manager.persistent_attributes)
 
             ## Switch statement to handle different queries
-            if query in ["wait", "hold on", "pause", "hang on", "just a moment", "let me think", "give me a second"]:
+            wait_invocations = ["wait", "hold on", "pause", "hang on", "just a moment", "let me think", "give me a second"]
+            save_invocations = ["save", "save session", "save chat history"]
+            delete_invocations = ["please delete persistent attributes"]
+            reset_invocations = ["please reset session parameters"]
+            
+            if query in wait_invocations:
                 ## Wait for x seconds
                 speak_output = f"<speak>Sure thing. <audio src='{S3_URI_1MIN_SILENCE}'/></speak>"
             elif query.startswith("add"):
                 ## Add to list
                 item = re.sub(r"^add\s+", "", query, flags=re.I).strip()
                 speak_output = smart_add_item(item, session_attr)
-            elif query.startswith("save"):
-                ## Attempt to save output
-                speak_output = "Saved"
-                session_page_id = save_chat_history_to_notion(page_id = session_attr.get("session_page_id", None), chat_history=session_attr.get("chat_history", []))
-                if " " not in session_page_id:
-                    session_attr["session_page_id"] = session_page_id
-                else:
-                    speak_output = session_page_id  # Error message
             elif ((any(keyword in query.lower() for keyword in ["get", "load", "retrieve"]) and 
                    any(phrase in query.lower() for phrase in ["shopping list", "mealie list"])) or 
                   any(phrase in query.lower() for phrase in ["my shopping list", "my mealie list"])):
                 ## Get Mealie shopping list
                 speak_output = get_shopping_list()
+            elif query in save_invocations:
+                ## Attempt to save output
+                speak_output = "Saved"
+                speak_output = save_session_to_notion(session_attr=session_attr)
+            elif query in delete_invocations:
+                handler_input.attributes_manager.delete_persistent_attributes()
+                handler_input.attributes_manager.session_attributes = session_attr = check_session_attr()
+                speak_output = "deleted persistent attributes and cleared session"
+            elif query in reset_invocations:
+                check_session_attr(session_attr, bool_reset = True)
+                speak_output = "reset session parameters"
             else:
                 ## General LLM response
                 speak_output = general_response(query, session_attr)
             
-            timestamp = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
-            session_attr["chat_history"].append((timestamp, query, speak_output))
+            if query not in wait_invocations + save_invocations + delete_invocations + reset_invocations:
+                timestamp = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+                session_attr["chat_history"].append((timestamp, query, speak_output))
 
             return (
                     handler_input.response_builder
@@ -218,17 +227,19 @@ class SessionEndedRequestHandler(AbstractRequestHandler):
         session_attr = handler_input.attributes_manager.session_attributes
         handler_input.attributes_manager.persistent_attributes = session_attr
         handler_input.attributes_manager.save_persistent_attributes()
-        save_chat_history_to_notion(page_id = session_attr.get("session_page_id", None), chat_history=session_attr.get("chat_history", []))
+        
+        speak_output = save_session_to_notion(session_attr=session_attr)
 
         return handler_input.response_builder.response
 
-def check_session_attr(session_attr = {}, persistent_attr = {}):
+def check_session_attr(session_attr = {}, persistent_attr = {}, bool_reset = False):
     ## Attempt to copy from persistent attributes
     if not session_attr:
         session_attr.update(persistent_attr)
-        session_attr.pop("launch_timestamp", None)
+        _ = session_attr.pop("launch_timestamp", None)
+        _ = session_attr.pop("session_page_id", None)
     
-    ## Initialize launch timestamp
+    ## Initialize session page
     if "launch_timestamp" not in session_attr:
         session_attr["launch_timestamp"] = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
     
@@ -237,17 +248,16 @@ def check_session_attr(session_attr = {}, persistent_attr = {}):
     ## TODO: Truncate
     
     ## Default models
-    if "model_main" not in session_attr:
+    if "model_main" not in session_attr or bool_reset:
         session_attr["model_main"] = MODEL_MAIN
-    if "model_free" not in session_attr:
+    if "model_free" not in session_attr or bool_reset:
         session_attr["model_free"] = MODEL_FREE
     session_attr["model_api_url"] = MODEL_API_URL
-    session_attr["model_headers"] = MODEL_HEADERS
     
     ## Default Parameters
-    if "max_input_chars" not in session_attr:
+    if "max_input_chars" not in session_attr or bool_reset:
         session_attr["max_input_chars"] = MAX_INPUT_CHARS
-    if "max_output_tokens" not in session_attr:
+    if "max_output_tokens" not in session_attr or bool_reset:
         session_attr["max_output_tokens"] = MAX_OUTPUT_TOKENS
     
     return session_attr
@@ -286,7 +296,7 @@ def general_response(query, session_attr = {}):
         }
         
         response = requests.post(session_attr["model_api_url"], 
-                                 headers=session_attr["model_headers"], data=json.dumps(data))
+                                 headers=MODEL_HEADERS, data=json.dumps(data))
         response_data = response.json()
         if response.ok:
             return response_data['choices'][0]['message']['content']
@@ -423,7 +433,7 @@ def smart_add_item(input_value, session_attr = {}):
             "messages": [{"role": "user", "content": prompt}]
         }
         response = requests.post(session_attr["model_api_url"], 
-                                 headers=session_attr["model_headers"], data=json.dumps(payload))
+                                 headers=MODEL_HEADERS, data=json.dumps(payload))
 
         if response.status_code != 200:
             return f"Error calling {payload['model']}: {response.status_code}, {response.text}"
@@ -457,18 +467,24 @@ def smart_add_item(input_value, session_attr = {}):
     except Exception as e:
         return f"Error occurred: {str(e)}"
 
-def save_chat_history_to_notion(page_id=None, chat_history=[]):
+def save_session_to_notion(session_attr):
     """
     Save chat history to a Notion page.
     """
     try:
+        session_attr = check_session_attr(session_attr)
+        
+        chat_history = session_attr["chat_history"]
+        chat_history = [entry for entry in chat_history if entry[0] >= session_attr["launch_timestamp"]]
         if not chat_history:
             return "No chat history provided to save."
-        if page_id is None:
-            page_id = find_or_create_notion_task(f"Session {chat_history[0][0]}", parent_page_id=NOTION_TASK_ID_CHATS)
+            
+        if "session_page_id" not in session_attr:
+            session_attr["session_page_id"] = find_or_create_notion_task(f"Session {session_attr['launch_timestamp']}", parent_page_id=NOTION_TASK_ID_CHATS)
+        session_page_id = session_attr["session_page_id"]
 
         ## Fetch existing content from the Notion page
-        response = requests.get(f"https://api.notion.com/v1/blocks/{page_id}/children", headers=NOTION_HEADERS)
+        response = requests.get(f"https://api.notion.com/v1/blocks/{session_page_id}/children", headers=NOTION_HEADERS)
         if response.status_code != 200:
             return f"Failed to fetch page content: {response.status_code}, {response.text}"
         
@@ -522,15 +538,15 @@ def save_chat_history_to_notion(page_id=None, chat_history=[]):
                 return f"Error processing chat history entry: {str(e)}"
         
         if not new_blocks:
-            return f"{page_id}"
+            return f"No new chat history to save."
         
         ## Add new chat history to the Notion page
         payload = {"children": new_blocks}
-        response = requests.patch(f"https://api.notion.com/v1/blocks/{page_id}/children", 
+        response = requests.patch(f"https://api.notion.com/v1/blocks/{session_page_id}/children", 
                                   headers=NOTION_HEADERS, data=json.dumps(payload))
         
         if response.status_code == 200:
-            return f"{page_id}"
+            return f"Successfully saved."
         else:
             return f"Error updating page: {response.status_code}, {response.text}"
     
