@@ -7,6 +7,7 @@ import ask_sdk_core.utils as ask_utils
 import pytz
 import logging
 from datetime import datetime
+from collections import defaultdict
 
 ##====================================================================================================##
 
@@ -17,7 +18,6 @@ import json
 import openai
 from dotenv import load_dotenv
 from collections import defaultdict
-
 
 ## Retrieve environment variables
 load_dotenv()
@@ -33,6 +33,8 @@ NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 NOTION_DATABASE_ID_TASKS = os.getenv("NOTION_DATABASE_ID_TASKS")
 NOTION_TASK_ID_GENERAL = os.getenv("NOTION_TASK_ID_GENERAL")
 NOTION_TASK_ID_CHATS = os.getenv("NOTION_TASK_ID_CHATS")
+
+S3_URI_1MIN_SILENCE = os.getenv("S3_URI_1MIN_SILENCE")
 
 ## Headers for authentication
 OPENAI_HEADERS = {
@@ -54,9 +56,10 @@ NOTION_HEADERS = {
 }
 
 ## API settings for selected model
-# MODEL_MAIN = "gpt-4o-mini"
-MODEL_MAIN = "google/gemini-2.0-flash-thinking-exp:free"
-MODEL_FREE = "google/gemini-2.0-flash-thinking-exp:free"
+MODEL_MAIN = "gpt-4o-mini"
+# MODEL_MAIN = "google/gemini-2.0-flash-thinking-exp:free"
+MODEL_FREE = "gpt-4o-mini"
+# MODEL_FREE = "google/gemini-2.0-flash-thinking-exp:free"
 MODEL_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL_HEADERS = OPENROUTER_HEADERS
 
@@ -111,8 +114,7 @@ class GeneralIntentHandler(AbstractRequestHandler):
             ## Switch statement to handle different queries
             if query in ["wait", "hold on", "pause", "hang on", "just a moment", "let me think", "give me a second"]:
                 ## Wait for x seconds
-                ## TODO: Not working
-                speak_output = "<speak>Sure thing. <audio src='https://github.com/anars/blank-audio/raw/refs/heads/master/10-seconds-of-silence.mp3'/></speak>"
+                speak_output = f"<speak>Sure thing. <audio src='{S3_URI_1MIN_SILENCE}'/></speak>"
             elif query.startswith("add"):
                 ## Add to list
                 item = re.sub(r"^add\s+", "", query, flags=re.I).strip()
@@ -125,7 +127,9 @@ class GeneralIntentHandler(AbstractRequestHandler):
                     session_attr["session_page_id"] = session_page_id
                 else:
                     speak_output = session_page_id  # Error message
-            elif any(keyword in query.lower() for keyword in ["get", "load", "retrieve"]) and any(phrase in query.lower() for phrase in ["shopping list", "mealie list"]):
+            elif ((any(keyword in query.lower() for keyword in ["get", "load", "retrieve"]) and 
+                   any(phrase in query.lower() for phrase in ["shopping list", "mealie list"])) or 
+                  any(phrase in query.lower() for phrase in ["my shopping list", "my mealie list"])):
                 ## Get Mealie shopping list
                 speak_output = get_shopping_list()
             elif query in ["session", "session attributes"]:
