@@ -3,6 +3,7 @@ from ask_sdk_core.dispatch_components import AbstractRequestHandler
 from ask_sdk_core.skill_builder import SkillBuilder
 from ask_sdk_core.handler_input import HandlerInput
 from ask_sdk_model import Response
+from ask_sdk_model import ui
 from ask_sdk_core.skill_builder import CustomSkillBuilder
 from ask_sdk_dynamodb.adapter import DynamoDbAdapter
 import ask_sdk_core.utils as ask_utils
@@ -93,14 +94,12 @@ class LaunchRequestHandler(AbstractRequestHandler):
 
     def handle(self, handler_input):
         # type: (HandlerInput) -> Response
-        speak_output = "How can I help?"
-        
         session_attr = check_session_attr(session_attr = handler_input.attributes_manager.session_attributes, persistent_attr = handler_input.attributes_manager.persistent_attributes)
 
         return (
             handler_input.response_builder
-                .speak(speak_output)
-                .ask(speak_output)
+                .speak("At your service.")
+                .ask("How can I help?")
                 .response
         )
 
@@ -116,7 +115,8 @@ class GeneralIntentHandler(AbstractRequestHandler):
             query = handler_input.request_envelope.request.intent.slots["query"].value
 
             ## Exit skill
-            if query in ["no", "stop", "exit", "quit", "cancel", "close", "nevermind", "no thank you", "save and exit"]:
+            exit_invocations = ["no", "stop", "exit", "quit", "cancel", "close", "nevermind", "no thank you", "save and exit"]
+            if query in exit_invocations:
                 return SessionEndedRequestHandler().handle(handler_input)
             
             session_attr = check_session_attr(session_attr = handler_input.attributes_manager.session_attributes, persistent_attr = handler_input.attributes_manager.persistent_attributes)
@@ -127,6 +127,10 @@ class GeneralIntentHandler(AbstractRequestHandler):
             delete_invocations = ["please delete persistent attributes"]
             reset_invocations = ["please reset session parameters"]
             
+            bool_get_shopping_list = ((any(keyword in query.lower() for keyword in ["get", "load", "retrieve"]) and 
+                                       any(phrase in query.lower() for phrase in ["shopping list", "mealie list"])) or 
+                                      any(phrase in query.lower() for phrase in ["my shopping list", "my mealie list", "mealie shopping list"]))
+            
             if query in wait_invocations:
                 ## Wait for x seconds
                 speak_output = f"<speak>Sure thing. <audio src='{S3_URI_1MIN_SILENCE}'/></speak>"
@@ -134,9 +138,7 @@ class GeneralIntentHandler(AbstractRequestHandler):
                 ## Add to list
                 item = re.sub(r"^add\s+", "", query, flags=re.I).strip()
                 speak_output = smart_add_item(item, session_attr)
-            elif ((any(keyword in query.lower() for keyword in ["get", "load", "retrieve"]) and 
-                   any(phrase in query.lower() for phrase in ["shopping list", "mealie list"])) or 
-                  any(phrase in query.lower() for phrase in ["my shopping list", "my mealie list"])):
+            elif bool_get_shopping_list:
                 ## Get Mealie shopping list
                 speak_output = get_shopping_list()
             elif query in save_invocations:
@@ -269,8 +271,9 @@ def general_response(query, session_attr = {}):
         session_attr = check_session_attr(session_attr)
 
         messages = [{"role": "system", "content": 
-                     "You are an AI voice assistant designed to engage in natural, real-time conversations. "
+                     "You are an AI voice assistant with the personality of a dignified, professional, and devoted butler named Alfred. "
                      "Assist users by answering questions, providing information, asking clarifying questions, offering suggestions, and acting as a sounding board. "
+                     "You are designed to engage in natural, real-time conversations. "
                      "Be conversationally concise with your responses. "
                      "Avoid unnecessary elaboration unless the user requests more details. "
                      "If you do not know the answer to a question, admit it honestly and suggest alternative ways the user might find the information."}]
@@ -564,12 +567,12 @@ def get_shopping_list():
     ## Group items by their labels
     grouped_items = defaultdict(list)
     for entry in items:
-        grouped_items[entry['label']].append(entry['item'])
+        grouped_items[entry['label']].append("[] " + entry['item'])
 
     ## Format the string
     total_items = sum(len(items) for items in grouped_items.values())
-    items_string = f"{total_items} items. " + ". ".join(
-        f"{len(items)} {label}: {', '.join(items)}" for label, items in grouped_items.items()
+    items_string = f"{total_items} items.\n" + "\n".join(
+        f"{len(items)} {label}:\n" + "\n".join(items) for label, items in grouped_items.items()
     )
     return items_string
 
