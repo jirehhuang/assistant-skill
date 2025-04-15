@@ -107,7 +107,7 @@ class GeneralIntentHandler(AbstractRequestHandler):
 
             ## Exit skill
             if query in ["no", "stop", "exit", "quit", "cancel", "close", "nevermind", "no thank you", "save and exit"]:
-                return CancelOrStopIntentHandler().handle(handler_input)
+                return SessionEndedRequestHandler().handle(handler_input)
             
             session_attr = initialize_session_attr(handler_input.attributes_manager.session_attributes)
 
@@ -182,21 +182,11 @@ class CancelOrStopIntentHandler(AbstractRequestHandler):
     def can_handle(self, handler_input):
         # type: (HandlerInput) -> bool
         return (ask_utils.is_intent_name("AMAZON.CancelIntent")(handler_input) or
-                ask_utils.is_intent_name("AMAZON.StopIntent")(handler_input) or
-                ask_utils.is_request_type("SessionEndedRequest")(handler_input))
+                ask_utils.is_intent_name("AMAZON.StopIntent")(handler_input))
 
     def handle(self, handler_input):
         # type: (HandlerInput) -> Response
-        
-        session_attr = handler_input.attributes_manager.session_attributes
-        
-        ## Attempt to save output
         speak_output = "OK"
-        session_page_id = save_chat_history_to_notion(page_id = session_attr.get("session_page_id", None), chat_history=session_attr.get("chat_history", []))
-        if " " not in session_page_id:
-            session_attr["session_page_id"] = session_page_id
-        else:
-            speak_output = session_page_id  # Error message
 
         return (
             handler_input.response_builder
@@ -204,6 +194,24 @@ class CancelOrStopIntentHandler(AbstractRequestHandler):
                 .set_should_end_session(True)
                 .response
         )
+
+class SessionEndedRequestHandler(AbstractRequestHandler):
+    """Handler for Session End."""
+    def can_handle(self, handler_input):
+        # type: (HandlerInput) -> bool
+        return ask_utils.is_request_type("SessionEndedRequest")(handler_input)
+
+    def handle(self, handler_input):
+        # type: (HandlerInput) -> Response
+        ## Log the reason for session end
+        reason = handler_input.request_envelope.request.reason
+        logger.info(f"Session ended with reason: {reason}")
+        
+        ## Attempt to save output
+        session_attr = handler_input.attributes_manager.session_attributes
+        save_chat_history_to_notion(page_id = session_attr.get("session_page_id", None), chat_history=session_attr.get("chat_history", []))
+
+        return handler_input.response_builder.response
 
 def initialize_session_attr(session_attr = {}):
     if "chat_history" not in session_attr:
@@ -530,6 +538,7 @@ sb = SkillBuilder()
 sb.add_request_handler(LaunchRequestHandler())
 sb.add_request_handler(GeneralIntentHandler())
 sb.add_request_handler(CancelOrStopIntentHandler())
+sb.add_request_handler(SessionEndedRequestHandler())
 sb.add_exception_handler(CatchAllExceptionHandler())
 
 lambda_handler = sb.lambda_handler()
