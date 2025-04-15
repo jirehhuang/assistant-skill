@@ -71,6 +71,22 @@ MODEL_HEADERS = OPENROUTER_HEADERS
 MAX_INPUT_CHARS = 10000
 MAX_OUTPUT_TOKENS = 300
 
+## Other
+WAIT_INVOCATIONS = ["wait", "hold on", "pause", "hang on", "just a moment", "let me think", "give me a second"]
+SAVE_INVOCATIONS = ["save", "save session", "save chat history"]
+DELETE_INVOCATIONS = ["please delete persistent attributes"]
+RESET_INVOCATIONS = ["please reset session parameters"]
+MEMORY_INVOCATIONS = ["please update memory", "update memory", "refresh memory"]
+
+UPDATE_MEMORY_PROMPT = f"""
+Given the previous message history between a user and an assistant, extract only the most relevant long-term details that would be helpful to persist across sessions.
+If you are provided with existing memory, make adjustments to where appropriate.
+Do not include temporary problems, one-time errors, or short-lived goals.
+Focus on high-value patterns such as tools being used, user preferences, recurring project themes, workflows being set up, or any strong indicators of personal or technical context.
+Avoid duplicating similar facts and aim for clarity and minimalism.
+Return the extracted memory in concise, neutral-language bullet points, as if writing an internal assistant profile to improve helpfulness in future conversations.
+"""
+
 ##====================================================================================================##
 
 ## Initialize the DynamoDB adapter
@@ -122,16 +138,11 @@ class GeneralIntentHandler(AbstractRequestHandler):
             session_attr = check_session_attr(session_attr = handler_input.attributes_manager.session_attributes, persistent_attr = handler_input.attributes_manager.persistent_attributes)
 
             ## Switch statement to handle different queries
-            wait_invocations = ["wait", "hold on", "pause", "hang on", "just a moment", "let me think", "give me a second"]
-            save_invocations = ["save", "save session", "save chat history"]
-            delete_invocations = ["please delete persistent attributes"]
-            reset_invocations = ["please reset session parameters"]
-            
             bool_get_shopping_list = ((any(keyword in query.lower() for keyword in ["get", "load", "retrieve"]) and 
                                        any(phrase in query.lower() for phrase in ["shopping list", "mealie list"])) or 
                                       any(phrase in query.lower() for phrase in ["my shopping list", "my mealie list", "mealie shopping list"]))
             
-            if query in wait_invocations:
+            if query in WAIT_INVOCATIONS:
                 ## Wait for x seconds
                 speak_output = f"<speak>Sure thing. <audio src='{S3_URI_1MIN_SILENCE}'/></speak>"
             elif query.startswith("add"):
@@ -141,22 +152,25 @@ class GeneralIntentHandler(AbstractRequestHandler):
             elif bool_get_shopping_list:
                 ## Get Mealie shopping list
                 speak_output = get_shopping_list()
-            elif query in save_invocations:
+            elif query in SAVE_INVOCATIONS:
                 ## Attempt to save output
                 speak_output = "Saved"
                 speak_output = save_session_to_notion(session_attr=session_attr)
-            elif query in delete_invocations:
+            elif query in MEMORY_INVOCATIONS:
+                session_attr["memory"] = general_response(UPDATE_MEMORY_PROMPT, session_attr)
+                speak_output = "Updated memory:\n" + session_attr["memory"]
+            elif query in DELETE_INVOCATIONS:
                 handler_input.attributes_manager.delete_persistent_attributes()
                 handler_input.attributes_manager.session_attributes = session_attr = check_session_attr()
-                speak_output = "deleted persistent attributes and cleared session"
-            elif query in reset_invocations:
+                speak_output = "Deleted persistent attributes and cleared session."
+            elif query in RESET_INVOCATIONS:
                 check_session_attr(session_attr, bool_reset = True)
-                speak_output = "reset session parameters"
+                speak_output = "Reset session parameters."
             else:
                 ## General LLM response
                 speak_output = general_response(query, session_attr)
             
-            if query not in wait_invocations + save_invocations + delete_invocations + reset_invocations:
+            if query not in WAIT_INVOCATIONS + SAVE_INVOCATIONS + MEMORY_INVOCATIONS + DELETE_INVOCATIONS + RESET_INVOCATIONS:
                 timestamp = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
                 session_attr["chat_history"].append((timestamp, query, speak_output))
 
@@ -248,6 +262,8 @@ def check_session_attr(session_attr = {}, persistent_attr = {}, bool_reset = Fal
     if "chat_history" not in session_attr:
         session_attr["chat_history"] = []
     ## TODO: Truncate
+    if "memory" not in session_attr:
+        session_attr["memory"] = "None."
     
     ## Default models
     if "model_main" not in session_attr or bool_reset:
@@ -270,13 +286,16 @@ def general_response(query, session_attr = {}):
         ## Check session attributes
         session_attr = check_session_attr(session_attr)
 
-        messages = [{"role": "system", "content": 
-                     "You are an AI voice assistant with the personality of a dignified, professional, and devoted butler named Alfred. "
-                     "Assist users by answering questions, providing information, asking clarifying questions, offering suggestions, and acting as a sounding board. "
-                     "You are designed to engage in natural, real-time conversations. "
-                     "Be conversationally concise with your responses. "
-                     "Avoid unnecessary elaboration unless the user requests more details. "
-                     "If you do not know the answer to a question, admit it honestly and suggest alternative ways the user might find the information."}]
+        messages = [{
+            "role": "system", "content": 
+            "You are an AI voice assistant with the personality of a dignified, professional, and devoted butler named Alfred. "
+            "Assist users by answering questions, providing information, asking clarifying questions, offering suggestions, and acting as a sounding board. "
+            "You are designed to engage in natural, real-time conversations. "
+            "Be conversationally concise with your responses. "
+            "Avoid unnecessary elaboration unless the user requests more details. "
+            "If you do not know the answer to a question, admit it honestly and suggest alternative ways the user might find the information.\n\n"
+            "Memory of users and conversation for context:\n" + session_attr["memory"]
+        }]
         
         total_chars = 0
         for timestamp, question, answer in reversed(session_attr["chat_history"]):
@@ -328,7 +347,7 @@ def add_to_mealie_list(item):
     except Exception as e:
         return f"Error occurred: {str(e)}"
 
-def create_notion_task(title, parent_page_id=NOTION_TASK_ID_GENERAL):
+def create_notion_task(title, parent_page_id=NOTION_TASK_ID_GENERAL, content=None):
     try:
         # Create the payload for the API request
         payload = {
@@ -353,6 +372,10 @@ def create_notion_task(title, parent_page_id=NOTION_TASK_ID_GENERAL):
             }
         }
 
+        # Add optional content as children if provided
+        if content:
+            payload["children"] = content
+
         # Send the request to create the page
         response = requests.post("https://api.notion.com/v1/pages", 
                                  headers=NOTION_HEADERS, 
@@ -369,7 +392,7 @@ def create_notion_task(title, parent_page_id=NOTION_TASK_ID_GENERAL):
         print(f"Error occurred: {str(e)}")
         return None
 
-def find_or_create_notion_task(title, parent_page_id=NOTION_TASK_ID_GENERAL):
+def find_or_create_notion_task(title, parent_page_id=NOTION_TASK_ID_GENERAL, content=None):
     try:
         # Search for a page with the same title and parent task
         query_payload = {
@@ -409,7 +432,7 @@ def find_or_create_notion_task(title, parent_page_id=NOTION_TASK_ID_GENERAL):
             return None
 
         # Create the page if it doesn't exist
-        return create_notion_task(title, parent_page_id)
+        return create_notion_task(title, parent_page_id, content)
 
     except Exception as e:
         print(f"Error occurred: {str(e)}")
@@ -423,7 +446,7 @@ def smart_add_item(input_value, session_attr = {}):
         ## Define the prompt
         prompt = f"""
         You are a smart assistant. Analyze the following input and split it into individual items. 
-        For each item, determine if it is a shopping item or a task/note. 
+        For each item, determine if it is a shopping item or a task/note.
         Respond with a JSON array where each element is a dictionary with "function" and "item" attributes.
         The output format should be a raw JSON array without formatting (such as code block) that can be interpretable with json.loads().
         "function" should be "add_to_mealie_list" for shopping items and "create_notion_task" for tasks and notes.
