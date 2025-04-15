@@ -3,9 +3,12 @@ from ask_sdk_core.dispatch_components import AbstractRequestHandler
 from ask_sdk_core.skill_builder import SkillBuilder
 from ask_sdk_core.handler_input import HandlerInput
 from ask_sdk_model import Response
+from ask_sdk_core.skill_builder import CustomSkillBuilder
+from ask_sdk_dynamodb.adapter import DynamoDbAdapter
 import ask_sdk_core.utils as ask_utils
 import pytz
 import logging
+import boto3
 from datetime import datetime
 from collections import defaultdict
 
@@ -69,6 +72,13 @@ MAX_OUTPUT_TOKENS = 300
 
 ##====================================================================================================##
 
+## Initialize the DynamoDB adapter
+ddb_region = os.environ.get('DYNAMODB_PERSISTENCE_REGION')
+ddb_table_name = os.environ.get('DYNAMODB_PERSISTENCE_TABLE_NAME')
+
+ddb_resource = boto3.resource('dynamodb', region_name=ddb_region)
+dynamodb_adapter = DynamoDbAdapter(table_name=ddb_table_name, create_table=False, dynamodb_resource=ddb_resource)
+
 TZ = pytz.timezone('America/Los_Angeles')
 
 logger = logging.getLogger(__name__)
@@ -85,7 +95,7 @@ class LaunchRequestHandler(AbstractRequestHandler):
         # type: (HandlerInput) -> Response
         speak_output = "How can I help?"
         
-        session_attr = initialize_session_attr(handler_input.attributes_manager.session_attributes)
+        session_attr = check_session_attr(session_attr = handler_input.attributes_manager.session_attributes, persistent_attr = handler_input.attributes_manager.persistent_attributes)
 
         return (
             handler_input.response_builder
@@ -109,7 +119,7 @@ class GeneralIntentHandler(AbstractRequestHandler):
             if query in ["no", "stop", "exit", "quit", "cancel", "close", "nevermind", "no thank you", "save and exit"]:
                 return SessionEndedRequestHandler().handle(handler_input)
             
-            session_attr = initialize_session_attr(handler_input.attributes_manager.session_attributes)
+            session_attr = check_session_attr(session_attr = handler_input.attributes_manager.session_attributes, persistent_attr = handler_input.attributes_manager.persistent_attributes)
 
             ## Switch statement to handle different queries
             if query in ["wait", "hold on", "pause", "hang on", "just a moment", "let me think", "give me a second"]:
@@ -132,9 +142,6 @@ class GeneralIntentHandler(AbstractRequestHandler):
                   any(phrase in query.lower() for phrase in ["my shopping list", "my mealie list"])):
                 ## Get Mealie shopping list
                 speak_output = get_shopping_list()
-            elif query in ["session", "session attributes"]:
-                ## TODO: Return session attributes (temporary, for debugging)
-                speak_output = str(session_attr)
             else:
                 ## General LLM response
                 speak_output = general_response(query, session_attr)
@@ -209,30 +216,47 @@ class SessionEndedRequestHandler(AbstractRequestHandler):
         
         ## Attempt to save output
         session_attr = handler_input.attributes_manager.session_attributes
+        handler_input.attributes_manager.persistent_attributes = session_attr
+        handler_input.attributes_manager.save_persistent_attributes()
         save_chat_history_to_notion(page_id = session_attr.get("session_page_id", None), chat_history=session_attr.get("chat_history", []))
 
         return handler_input.response_builder.response
 
-def initialize_session_attr(session_attr = {}):
+def check_session_attr(session_attr = {}, persistent_attr = {}):
+    ## Attempt to copy from persistent attributes
+    if not session_attr:
+        session_attr.update(persistent_attr)
+        session_attr.pop("launch_timestamp", None)
+    
+    ## Initialize launch timestamp
+    if "launch_timestamp" not in session_attr:
+        session_attr["launch_timestamp"] = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+    
     if "chat_history" not in session_attr:
         session_attr["chat_history"] = []
+    ## TODO: Truncate
+    
+    ## Default models
     if "model_main" not in session_attr:
         session_attr["model_main"] = MODEL_MAIN
     if "model_free" not in session_attr:
         session_attr["model_free"] = MODEL_FREE
     session_attr["model_api_url"] = MODEL_API_URL
     session_attr["model_headers"] = MODEL_HEADERS
+    
+    ## Default Parameters
     if "max_input_chars" not in session_attr:
         session_attr["max_input_chars"] = MAX_INPUT_CHARS
     if "max_output_tokens" not in session_attr:
         session_attr["max_output_tokens"] = MAX_OUTPUT_TOKENS
+    
     return session_attr
 
 def general_response(query, session_attr = {}):
     """Generates a general response to a query."""
     try:
         ## Check session attributes
-        session_attr = initialize_session_attr(session_attr)
+        session_attr = check_session_attr(session_attr)
 
         messages = [{"role": "system", "content": 
                      "You are an AI voice assistant designed to engage in natural, real-time conversations. "
@@ -251,6 +275,7 @@ def general_response(query, session_attr = {}):
             messages.append({"role": "assistant", "content": assistant_message})
             total_chars += len(user_message) + len(assistant_message)
         
+        messages.reverse()
         messages.append({"role": "user", "content": query})
         
         data = {
@@ -380,7 +405,7 @@ def find_or_create_notion_task(title, parent_page_id=NOTION_TASK_ID_GENERAL):
 def smart_add_item(input_value, session_attr = {}):
     try:
         ## Check session attributes
-        session_attr = initialize_session_attr(session_attr)
+        session_attr = check_session_attr(session_attr)
 
         ## Define the prompt
         prompt = f"""
@@ -533,7 +558,7 @@ def get_shopping_list():
     return items_string
 
 
-sb = SkillBuilder()
+sb = CustomSkillBuilder(persistence_adapter = dynamodb_adapter)
 
 sb.add_request_handler(LaunchRequestHandler())
 sb.add_request_handler(GeneralIntentHandler())
