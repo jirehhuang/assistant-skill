@@ -235,9 +235,6 @@ class SessionEndedRequestHandler(AbstractRequestHandler):
 
     def handle(self, handler_input):
         # type: (HandlerInput) -> Response
-        ## Log the reason for session end
-        reason = handler_input.request_envelope.request.reason
-        logger.info(f"Session ended with reason: {reason}")
         
         ## Attempt to save output
         session_attr = handler_input.attributes_manager.session_attributes
